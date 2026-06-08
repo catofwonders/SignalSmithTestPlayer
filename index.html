@@ -144,6 +144,19 @@
   .volrow input { flex:1; }
 
   .status { font-size: 12px; color: var(--muted); margin: 4px 2px 0; min-height: 16px; }
+
+  .cardhead { font-family:"Bricolage Grotesque",sans-serif; font-weight:600; font-size:13px; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin:-2px 0 16px; }
+  .switch.wide { width:100%; align-items:flex-start; }
+  .switch.wide span:last-child { font-size:13.5px; line-height:1.45; }
+  .switch.wide em { color:var(--muted); font-style:normal; font-size:12px; }
+  .seg { display:flex; gap:6px; background:#0000001f; border:1px solid var(--line); border-radius:12px; padding:5px; }
+  .seg button {
+    flex:1; border:none; background:transparent; color:var(--muted);
+    font:inherit; font-size:13px; font-weight:600; padding:10px 8px; border-radius:8px; cursor:pointer;
+    transition: background .15s, color .15s;
+  }
+  .seg button.on { background:linear-gradient(180deg,#ffce7a,var(--accent)); color:#2a1c08; box-shadow:0 3px 10px -4px var(--accent); }
+  .seg button:not(.on):hover { color:var(--ink); }
   .status.ok { color: var(--good); }
   .status.error { color: var(--bad); }
   .status.busy { color: var(--accent); }
@@ -207,6 +220,32 @@
           <span>Loop</span>
         </label>
         <button id="reset">Reset speed &amp; pitch</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="cardhead">Voice &amp; quality</div>
+
+      <label class="switch wide">
+        <input type="checkbox" id="formant" checked>
+        <span class="track"></span>
+        <span>Preserve formants <em>— keeps voices natural when shifting pitch</em></span>
+      </label>
+
+      <div class="ctl" style="margin-top:18px">
+        <div class="row"><span class="label">Formant</span><span class="val" id="fshiftVal">0</span></div>
+        <input type="range" id="fshift" min="-12" max="12" step="1" value="0">
+        <div class="hint">Shifts vocal timbre up/down without moving the notes.</div>
+      </div>
+
+      <div class="ctl" style="margin-top:18px">
+        <div class="row"><span class="label">Character</span></div>
+        <div class="seg" role="group" aria-label="Character">
+          <button id="segSharp" type="button">Sharp</button>
+          <button id="segBalanced" type="button" class="on">Balanced</button>
+          <button id="segSmooth" type="button">Smooth</button>
+        </div>
+        <div class="hint">Sharp keeps transients crisp; Smooth is cleaner for big slowdowns.</div>
       </div>
     </div>
 
@@ -682,62 +721,43 @@ if (typeof exports === 'object' && typeof module === 'object') {
   const $ = (id) => document.getElementById(id);
 
   const ui = {
-    drop: $("drop"),
-    file: $("file"),
-    pick: $("pick"),
-    name: $("name"),
-    status: $("status"),
-    transport: $("transport"),
-    play: $("play"),
-    playIcon: $("playIcon"),
-    scrub: $("scrub"),
-    cur: $("cur"),
-    dur: $("dur"),
-    speed: $("speed"),
-    speedVal: $("speedVal"),
-    pitch: $("pitch"),
-    pitchVal: $("pitchVal"),
-    pitchNote: $("pitchNote"),
-    vol: $("vol"),
-    loop: $("loop"),
-    reset: $("reset"),
+    drop: $("drop"), file: $("file"), name: $("name"), status: $("status"),
+    transport: $("transport"), play: $("play"), playIcon: $("playIcon"),
+    scrub: $("scrub"), cur: $("cur"), dur: $("dur"),
+    speed: $("speed"), speedVal: $("speedVal"),
+    pitch: $("pitch"), pitchVal: $("pitchVal"), pitchNote: $("pitchNote"),
+    formant: $("formant"), fshift: $("fshift"), fshiftVal: $("fshiftVal"),
+    vol: $("vol"), loop: $("loop"), reset: $("reset"),
+    segSharp: $("segSharp"), segBalanced: $("segBalanced"), segSmooth: $("segSmooth"),
   };
 
+  const CHAR = { sharp: 45, balanced: 100, smooth: 170 };
+
   const state = {
-    ctx: null,
-    node: null,
-    gain: null,
-    duration: 0,
-    position: 0,
-    playing: false,
-    loaded: false,
-    scrubbing: false,
-    rate: 1,
-    semitones: 0,
+    ctx: null, node: null, gain: null,
+    duration: 0, position: 0, playing: false, loaded: false, scrubbing: false,
+    rate: 1, semitones: 0,
+    formant: true,        // preserve formants (natural voice when pitch-shifting)
+    formantSemitones: 0,  // explicit formant/timbre shift
+    blockMs: CHAR.balanced,
   };
 
   function setStatus(msg, kind) {
     ui.status.textContent = msg || "";
     ui.status.className = "status" + (kind ? " " + kind : "");
   }
-
   function fmtTime(s) {
     if (!isFinite(s) || s < 0) s = 0;
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
     return m + ":" + String(sec).padStart(2, "0");
   }
-
-  const NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   function intervalLabel(semis) {
     if (semis === 0) return "original key";
-    const dir = semis > 0 ? "up" : "down";
     const n = Math.abs(semis);
-    return n + (n === 1 ? " semitone " : " semitones ") + dir;
+    return n + (n === 1 ? " semitone " : " semitones ") + (semis > 0 ? "up" : "down");
   }
 
   // ---- Audio setup -------------------------------------------------------
-
   async function ensureContext() {
     if (!state.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -746,16 +766,11 @@ if (typeof exports === 'object' && typeof module === 'object') {
       state.gain.gain.value = parseFloat(ui.vol.value);
       state.gain.connect(state.ctx.destination);
     }
-    // Mobile browsers start the context suspended until a user gesture.
-    if (state.ctx.state === "suspended") {
-      await state.ctx.resume();
-    }
+    if (state.ctx.state === "suspended") await state.ctx.resume();
   }
-
   async function ensureNode() {
     if (state.node) return state.node;
-    // Default options give a stereo node (outputChannelCount [2]).
-    state.node = await SignalsmithStretch(state.ctx);
+    state.node = await SignalsmithStretch(state.ctx); // defaults to stereo
     state.node.connect(state.gain);
     state.node.setUpdateInterval(0.05, onTimeUpdate);
     return state.node;
@@ -767,7 +782,6 @@ if (typeof exports === 'object' && typeof module === 'object') {
       ui.scrub.value = String(Math.max(0, Math.min(state.duration, t)));
       ui.cur.textContent = fmtTime(t);
     }
-    // Auto-stop at the end when not looping.
     if (state.playing && !ui.loop.checked && state.duration && t >= state.duration - 0.03) {
       stop();
       state.position = 0;
@@ -776,15 +790,34 @@ if (typeof exports === 'object' && typeof module === 'object') {
     }
   }
 
+  // Field builders merged into every schedule() segment.
   function loopFields() {
-    if (ui.loop.checked && state.duration) {
-      return { loopStart: 0, loopEnd: state.duration };
-    }
-    return { loopStart: 0, loopEnd: 0 }; // equal values = looping disabled
+    return (ui.loop.checked && state.duration)
+      ? { loopStart: 0, loopEnd: state.duration }
+      : { loopStart: 0, loopEnd: 0 };
+  }
+  function voiceFields() {
+    return {
+      formantCompensation: state.formant,
+      formantSemitones: state.formantSemitones,
+      formantBaseHz: 0,   // 0 = let the engine pitch-track
+      tonalityHz: 8000,
+    };
   }
 
-  // ---- Loading a file ----------------------------------------------------
+  // Single scheduler used everywhere. keepPosition=true while playing keeps
+  // playback continuous (we omit `input` so the engine carries on smoothly).
+  function reschedule(keepPosition) {
+    if (!state.node) return;
+    const seg = Object.assign(
+      { active: state.playing, output: state.ctx.currentTime, rate: state.rate, semitones: state.semitones },
+      loopFields(), voiceFields()
+    );
+    if (!keepPosition || !state.playing) seg.input = state.position;
+    state.node.schedule(seg);
+  }
 
+  // ---- Loading -----------------------------------------------------------
   async function loadFile(file) {
     if (!file) return;
     try {
@@ -793,22 +826,15 @@ if (typeof exports === 'object' && typeof module === 'object') {
       await ensureContext();
       await ensureNode();
 
-      const arrayBuf = await file.arrayBuffer();
-      const audioBuf = await state.ctx.decodeAudioData(arrayBuf);
+      const audioBuf = await state.ctx.decodeAudioData(await file.arrayBuffer());
+      const chans = audioBuf.numberOfChannels >= 2
+        ? [audioBuf.getChannelData(0), audioBuf.getChannelData(1)]
+        : [audioBuf.getChannelData(0), audioBuf.getChannelData(0)];
 
-      // The node is stereo; build exactly two channel arrays.
-      let chans;
-      if (audioBuf.numberOfChannels >= 2) {
-        chans = [audioBuf.getChannelData(0), audioBuf.getChannelData(1)];
-      } else {
-        const mono = audioBuf.getChannelData(0);
-        chans = [mono, mono];
-      }
-
-      // Reset any previously loaded audio, then feed the new buffers.
       state.playing = false;
       updatePlayIcon();
       await state.node.dropBuffers();
+      try { await state.node.configure({ blockMs: state.blockMs }); } catch (e) { console.error(e); }
       await state.node.addBuffers(chans);
 
       state.duration = audioBuf.duration;
@@ -823,9 +849,7 @@ if (typeof exports === 'object' && typeof module === 'object') {
       ui.transport.classList.add("ready");
       ui.play.disabled = false;
 
-      // Park the playhead at the start (not playing yet).
-      state.node.schedule({ active: false, input: 0, rate: state.rate, semitones: state.semitones });
-
+      reschedule(false); // park at start
       setStatus("Ready — press play.", "ok");
     } catch (err) {
       console.error(err);
@@ -834,23 +858,12 @@ if (typeof exports === 'object' && typeof module === 'object') {
   }
 
   // ---- Transport ---------------------------------------------------------
-
   async function play() {
     if (!state.loaded) return;
     try {
       await ensureContext();
-      const seg = Object.assign(
-        {
-          active: true,
-          output: state.ctx.currentTime,
-          input: state.position,
-          rate: state.rate,
-          semitones: state.semitones,
-        },
-        loopFields()
-      );
-      state.node.schedule(seg);
       state.playing = true;
+      reschedule(false); // resume from saved position
       updatePlayIcon();
       setStatus("");
     } catch (err) {
@@ -858,18 +871,13 @@ if (typeof exports === 'object' && typeof module === 'object') {
       setStatus("Playback error: " + (err && err.message ? err.message : err), "error");
     }
   }
-
   function stop() {
     if (!state.node) return;
     state.node.schedule({ active: false, output: state.ctx.currentTime });
     state.playing = false;
     updatePlayIcon();
   }
-
-  function togglePlay() {
-    if (state.playing) stop();
-    else play();
-  }
+  function togglePlay() { state.playing ? stop() : play(); }
 
   function updatePlayIcon() {
     ui.playIcon.innerHTML = state.playing
@@ -878,117 +886,84 @@ if (typeof exports === 'object' && typeof module === 'object') {
     ui.play.setAttribute("aria-label", state.playing ? "Pause" : "Play");
   }
 
-  // ---- Live parameter changes -------------------------------------------
-
-  function pushParamsLive() {
-    // While playing, re-schedule keeping the current position continuous
-    // (omitting `input` lets the engine carry on smoothly).
-    if (state.playing && state.node) {
-      const seg = Object.assign(
-        { active: true, output: state.ctx.currentTime, rate: state.rate, semitones: state.semitones },
-        loopFields()
-      );
-      state.node.schedule(seg);
-    }
-  }
-
+  // ---- Parameter changes -------------------------------------------------
   function setSpeed(v) {
     state.rate = v;
     ui.speedVal.textContent = Math.round(v * 100) + "%";
-    pushParamsLive();
+    reschedule(true);
   }
-
   function setPitch(semi) {
     state.semitones = semi;
     ui.pitchVal.textContent = (semi > 0 ? "+" : "") + semi + " st";
     ui.pitchNote.textContent = intervalLabel(semi);
-    pushParamsLive();
+    reschedule(true);
+  }
+  function setFormantShift(semi) {
+    state.formantSemitones = semi;
+    ui.fshiftVal.textContent = (semi > 0 ? "+" : "") + semi;
+    reschedule(true);
+  }
+  async function setCharacter(blockMs, btn) {
+    state.blockMs = blockMs;
+    [ui.segSharp, ui.segBalanced, ui.segSmooth].forEach((b) => b.classList.toggle("on", b === btn));
+    if (state.node) {
+      try { await state.node.configure({ blockMs }); } catch (e) { console.error(e); }
+      reschedule(true);
+    }
   }
 
   // ---- Wiring ------------------------------------------------------------
-
-  ui.pick.addEventListener("click", () => ui.file.click());
   ui.drop.addEventListener("click", () => ui.file.click());
   ui.file.addEventListener("change", (e) => loadFile(e.target.files[0]));
-
-  ["dragenter", "dragover"].forEach((ev) =>
-    ui.drop.addEventListener(ev, (e) => {
-      e.preventDefault();
-      ui.drop.classList.add("hover");
-    })
-  );
-  ["dragleave", "drop"].forEach((ev) =>
-    ui.drop.addEventListener(ev, (e) => {
-      e.preventDefault();
-      ui.drop.classList.remove("hover");
-    })
-  );
-  ui.drop.addEventListener("drop", (e) => {
-    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f) loadFile(f);
-  });
+  ["dragenter", "dragover"].forEach((ev) => ui.drop.addEventListener(ev, (e) => { e.preventDefault(); ui.drop.classList.add("hover"); }));
+  ["dragleave", "drop"].forEach((ev) => ui.drop.addEventListener(ev, (e) => { e.preventDefault(); ui.drop.classList.remove("hover"); }));
+  ui.drop.addEventListener("drop", (e) => { const f = e.dataTransfer?.files?.[0]; if (f) loadFile(f); });
 
   ui.play.addEventListener("click", togglePlay);
 
-  ui.scrub.addEventListener("input", () => {
-    state.scrubbing = true;
-    ui.cur.textContent = fmtTime(parseFloat(ui.scrub.value));
-  });
+  ui.scrub.addEventListener("input", () => { state.scrubbing = true; ui.cur.textContent = fmtTime(parseFloat(ui.scrub.value)); });
   ui.scrub.addEventListener("change", () => {
-    const t = parseFloat(ui.scrub.value);
-    state.position = t;
+    state.position = parseFloat(ui.scrub.value);
     state.scrubbing = false;
-    if (state.node) {
-      const seg = Object.assign(
-        { active: state.playing, output: state.ctx.currentTime, input: t, rate: state.rate, semitones: state.semitones },
-        loopFields()
-      );
-      state.node.schedule(seg);
-    }
+    reschedule(false);
   });
 
   ui.speed.addEventListener("input", () => setSpeed(parseFloat(ui.speed.value)));
   ui.pitch.addEventListener("input", () => setPitch(parseInt(ui.pitch.value, 10)));
-  ui.vol.addEventListener("input", () => {
-    if (state.gain) state.gain.gain.value = parseFloat(ui.vol.value);
-  });
-  ui.loop.addEventListener("change", pushParamsLive);
+  ui.fshift.addEventListener("input", () => setFormantShift(parseInt(ui.fshift.value, 10)));
+  ui.formant.addEventListener("change", () => { state.formant = ui.formant.checked; reschedule(true); });
+  ui.vol.addEventListener("input", () => { if (state.gain) state.gain.gain.value = parseFloat(ui.vol.value); });
+  ui.loop.addEventListener("change", () => reschedule(true));
+
+  ui.segSharp.addEventListener("click", () => setCharacter(CHAR.sharp, ui.segSharp));
+  ui.segBalanced.addEventListener("click", () => setCharacter(CHAR.balanced, ui.segBalanced));
+  ui.segSmooth.addEventListener("click", () => setCharacter(CHAR.smooth, ui.segSmooth));
 
   ui.reset.addEventListener("click", () => {
-    ui.speed.value = "1";
-    ui.pitch.value = "0";
-    setSpeed(1);
-    setPitch(0);
+    ui.speed.value = "1"; ui.pitch.value = "0"; ui.fshift.value = "0";
+    setSpeed(1); setPitch(0); setFormantShift(0);
+    paintRange(ui.speed); paintRange(ui.pitch); paintRange(ui.fshift);
   });
 
-  // Spacebar = play/pause (when not typing).
   document.addEventListener("keydown", (e) => {
-    if (e.code === "Space" && state.loaded && e.target.tagName !== "INPUT") {
-      e.preventDefault();
-      togglePlay();
-    }
+    if (e.code === "Space" && state.loaded && e.target.tagName !== "INPUT") { e.preventDefault(); togglePlay(); }
   });
 
-  // Visual fill for range tracks (WebKit needs a CSS var).
+  // Visual fill for range tracks.
   function paintRange(el) {
     const min = parseFloat(el.min || 0), max = parseFloat(el.max || 100);
     const pct = max > min ? ((parseFloat(el.value) - min) / (max - min)) * 100 : 0;
     el.style.setProperty("--fill", pct + "%");
   }
-  ["speed", "pitch", "vol", "scrub"].forEach((id) => {
-    const el = ui[id];
-    el.addEventListener("input", () => paintRange(el));
-    paintRange(el);
+  ["speed", "pitch", "fshift", "vol", "scrub"].forEach((id) => {
+    const el = ui[id]; el.addEventListener("input", () => paintRange(el)); paintRange(el);
   });
-  // Repaint scrub as it advances during playback.
-  const _origTime = onTimeUpdate;
-  // (onTimeUpdate already updates scrub.value; repaint it too)
   const scrubObserver = setInterval(() => { if (state.playing) paintRange(ui.scrub); }, 80);
   window.addEventListener("beforeunload", () => clearInterval(scrubObserver));
 
-  // Initial labels
-  setSpeed(1);
-  setPitch(0);
+  // Initial state
+  ui.formant.checked = true;
+  setSpeed(1); setPitch(0); setFormantShift(0);
   updatePlayIcon();
   setStatus("Load an audio file to begin.");
 })();
